@@ -1,0 +1,195 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>3D Photo Particle Visualizer - Right Hand Only</title>
+    <style>
+        body { margin: 0; overflow: hidden; background: #000; font-family: sans-serif; }
+        #container { position: absolute; top: 0; left: 0; width: 100%; height: 100%; }
+        #ui {
+            position: absolute; top: 20px; left: 20px; z-index: 10;
+            background: rgba(0, 0, 0, 0.7); padding: 15px; border-radius: 8px;
+            color: white; backdrop-filter: blur(5px); border: 1px solid rgba(255,255,255,0.1);
+        }
+        .status { font-size: 12px; color: #0f0; margin-bottom: 10px; }
+        canvas#output_canvas {
+            position: absolute; bottom: 20px; right: 20px;
+            width: 240px; height: 180px; transform: scaleX(-1);
+            border: 2px solid #444; border-radius: 4px; z-index: 5;
+        }
+        video#input_video { display: none; }
+    </style>
+</head>
+<body>
+
+<div id="ui">
+    <div class="status" id="hand-status">Searching for Right Hand...</div>
+    <div style="font-size: 11px;">Gunakan <b>Tangan Kanan</b> untuk mengontrol galeri foto.</div>
+</div>
+
+<video id="input_video"></video>
+<canvas id="output_canvas"></canvas>
+<div id="container"></div>
+
+<script src="https://cdn.jsdelivr.net/npm/three@0.152.0/build/three.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
+
+<script>
+    /** --- KONFIGURASI & STATE --- **/
+    const PARTICLE_COUNT = 1000; // Dikurangi agar tidak berat karena menggunakan tekstur foto
+    const imageSources = [
+        'ulfa/ulfa1.jpg', 'ulfa/ulfa2.jpg', 'ulfa/ulfa3.jpg',
+        'ulfa/ulfa4.jpg', 'ulfa/ulfa5.jpg', 'ulfa/ulfa6.jpg',
+        'ulfa/ulfa7.jpg', 'ulfa/ulfa8.jpg', 'ulfa/ulfa9.jpg', 'ulfa/ulfa10.jpg', 'ulfa/ulfa11.jpg', 'ulfa/ulfa12.jpg',
+        'ulfa/ulfa13.jpg', 'ulfa/ulfa14.jpg', 'ulfa/ulfa15.jpg',
+        'ulfa/ulfa16.jpg', 'ulfa/ulfa17.jpg', 'ulfa/ulfa18.jpg', 'ulfa/ulfa19.jpg', 'ulfa/ulfa20.jpg', 'ulfa/ulfa21.jpg',
+        'ulfa/ulfa22.jpg', 'ulfa/ulfa23.jpg', 'ulfa/ulfa24.jpg',
+        'ulfa/ulfa25.jpg', 'ulfa/ulfa26.jpg', 'ulfa/ulfa27.jpg', 'ulfa/ulfa28.jpg'
+        ];
+
+    const state = {
+        currentPos: new THREE.Vector3(0, 0, 0),
+        targetPos: new THREE.Vector3(0, 0, 0),
+        currentScale: 1.0,
+        targetScale: 1.0,
+        currentRotZ: 0,
+        targetRotZ: 0,
+        lerpFactor: 0.08,
+        restState: { pos: new THREE.Vector3(0,0,0), scale: 1.0, rotZ: 0 }
+    };
+
+    /** --- THREE.JS SETUP --- **/
+    const scene = new THREE.Scene();
+    const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 3000);
+    camera.position.z = 800;
+
+    const renderer = new THREE.WebGLRenderer({ antialias: true });
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    document.getElementById('container').appendChild(renderer.domElement);
+
+    const particleGroup = new THREE.Group();
+    scene.add(particleGroup);
+
+    /** --- LOAD TEXTURES & CREATE PARTICLES --- **/
+    const textureLoader = new THREE.TextureLoader();
+    
+    const initPhotoParticles = () => {
+        const particlesPerTexture = Math.floor(PARTICLE_COUNT / imageSources.length);
+
+        imageSources.forEach((src) => {
+            const texture = textureLoader.load(src);
+            const geometry = new THREE.BufferGeometry();
+            const positions = new Float32Array(particlesPerTexture * 3);
+            
+            for (let i = 0; i < particlesPerTexture; i++) {
+                const idx = i * 3;
+                // Formasi Galaxy/Sphere
+                const r = 200 + Math.random() * 400;
+                const theta = Math.random() * Math.PI * 2;
+                positions[idx] = r * Math.cos(theta);
+                positions[idx + 1] = (Math.random() - 0.5) * 500;
+                positions[idx + 2] = r * Math.sin(theta);
+            }
+
+            geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+
+            const material = new THREE.PointsMaterial({
+                size: 25, // Ukuran diperbesar agar foto terlihat jelas
+                map: texture,
+                transparent: true,
+                alphaTest: 0.2,
+                blending: THREE.AdditiveBlending,
+                depthWrite: false
+            });
+
+            const points = new THREE.Points(geometry, material);
+            particleGroup.add(points);
+        });
+    };
+
+    initPhotoParticles();
+
+    /** --- MEDIAPIPE LOGIC --- **/
+    const videoElement = document.getElementById('input_video');
+    const canvasElement = document.getElementById('output_canvas');
+    const canvasCtx = canvasElement.getContext('2d');
+    const statusEl = document.getElementById('hand-status');
+
+    function onResults(results) {
+        canvasCtx.save();
+        canvasCtx.clearRect(0, 0, canvasElement.width, canvasElement.height);
+        canvasCtx.drawImage(results.image, 0, 0, canvasElement.width, canvasElement.height);
+
+        let rightHandFound = false;
+
+        if (results.multiHandLandmarks && results.multiHandedness) {
+            for (let i = 0; i < results.multiHandLandmarks.length; i++) {
+                if (results.multiHandedness[i].label === 'Right') {
+                    rightHandFound = true;
+                    const landmarks = results.multiHandLandmarks[i];
+                    
+                    // Mapping posisi
+                    state.targetPos.x = (0.5 - landmarks[8].x) * 1000;
+                    state.targetPos.y = (0.5 - landmarks[8].y) * 800;
+
+                    // Pinch Zoom
+                    const dist = Math.hypot(landmarks[8].x - landmarks[4].x, landmarks[8].y - landmarks[4].y);
+                    state.targetScale = THREE.MathUtils.clamp(dist * 8, 0.4, 4.0);
+
+                    // Tilt Rotation
+                    state.targetRotZ = Math.atan2(landmarks[8].y - landmarks[4].y, landmarks[8].x - landmarks[4].x);
+                    
+                    statusEl.innerText = "Tracking Right Hand";
+                    statusEl.style.color = "#0f0";
+                }
+            }
+        }
+
+        if (!rightHandFound) {
+            state.targetPos.copy(state.restState.pos);
+            state.targetScale = state.restState.scale;
+            state.targetRotZ = state.restState.rotZ;
+            statusEl.innerText = "Searching for Right Hand...";
+            statusEl.style.color = "#ff4444";
+        }
+        canvasCtx.restore();
+    }
+
+    const hands = new Hands({ locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}` });
+    hands.setOptions({ maxNumHands: 1, modelComplexity: 1, minDetectionConfidence: 0.5, minTrackingConfidence: 0.5 });
+    hands.onResults(onResults);
+
+    const cameraUtils = new Camera(videoElement, {
+        onFrame: async () => { await hands.send({image: videoElement}); },
+        width: 640, height: 480
+    });
+    cameraUtils.start();
+
+    /** --- SINGLE ANIMATION LOOP --- **/
+    function animate() {
+        requestAnimationFrame(animate);
+
+        // Smoothing
+        state.currentPos.lerp(state.targetPos, state.lerpFactor);
+        state.currentScale = THREE.MathUtils.lerp(state.currentScale, state.targetScale, state.lerpFactor);
+        state.currentRotZ = THREE.MathUtils.lerp(state.currentRotZ, state.targetRotZ, state.lerpFactor);
+
+        // Transformasi
+        particleGroup.position.set(state.currentPos.x, state.currentPos.y, 0);
+        particleGroup.scale.setScalar(state.currentScale);
+        particleGroup.rotation.z = state.currentRotZ;
+        particleGroup.rotation.y += 0.003; // Rotasi otomatis lambat
+
+        renderer.render(scene, camera);
+    }
+    animate();
+
+    window.addEventListener('resize', () => {
+        camera.aspect = window.innerWidth / window.innerHeight;
+        camera.updateProjectionMatrix();
+        renderer.setSize(window.innerWidth, window.innerHeight);
+    });
+</script>
+</body>
+</html>
